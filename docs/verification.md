@@ -50,3 +50,24 @@ Resultado final: **63 pruebas correctas**, comprobaciones de tipos y lint correc
 ## Demo pública temporal
 
 Se añadió `PUBLIC_ORIGIN` opcional y exacto para compartir la demo mediante Cloudflare Quick Tunnel, conservando el origen de la red local. Se verificó la página y `/api/health` por HTTPS público, además del acceso LAN. La prueba de integración admite ambos orígenes y rechaza hosts/orígenes ajenos; la suite final tiene **65 pruebas correctas**, tipos, lint y build correctos. No se configuró un servicio permanente ni se abrieron puertos en el router.
+
+## Actualización multimedia general
+
+La compatibilidad deja de estar restringida a X. Se aceptan páginas públicas HTTP/HTTPS, extractores de yt-dlp, HTML estático y archivos directos. Se incorporan audio, WebM, MOV/MKV, AVIF, HLS/DASH y unión de pistas compatibles. Los GIFs directos se conservan y las animaciones MP4 de X siguen convirtiéndose a GIF.
+
+Comprobaciones completadas:
+
+- **89 pruebas correctas en 10 archivos**, TypeScript estricto, lint y build correctos.
+- `pnpm audit --prod`: sin vulnerabilidades conocidas en las dependencias resueltas.
+- HLS, DASH y unión de audio/vídeo comprobados con **yt-dlp, FFmpeg y FFprobe reales** sobre medios generados para pruebas y transporte de red controlado. Se verifica un MP4 reproducible con ambas pistas.
+- Nuevas pruebas del proxy para HTTP y CONNECT: DNS privado y rebinding, IP fijada, credenciales de proxy eliminadas y presupuesto agregado de bytes. Una prueba con yt-dlp real confirma que el proxy explícito no se omite al recibir una URL loopback; un servidor señuelo local no recibió ninguna petición.
+- Descarga real de `https://www.youtube.com/watch?v=jNQXAC9IVRw`: MP4 de 635.505 bytes con audio y vídeo, y M4A independiente de 309.288 bytes. Se repitió a través del túnel público HTTPS con `scripts/smoke.mjs`.
+- Descargas directas reales de Mozilla: MP4 `flower.mp4` (1.130.950 bytes después del remux) y MP3 `t-rex-roar.mp3` (39.868 bytes).
+- Detección HTML real en Python.org: dos imágenes, con primera imagen PNG descargada y validada (7.821 bytes).
+- GIF directo de Wikimedia `Rotating_earth_(large).gif`: 1.001.718 bytes, conservado como `image/gif`.
+- Regresión de X: el GIF del enlace probado anteriormente volvió a descargarse como GIF real de 5.971.565 bytes.
+- Navegador: descarga real del MP3 desde la interfaz a 320 px; contenido y viewport coincidieron en 320 y 1280 px, sin desbordamiento horizontal. La portada pública actualizada se abrió por HTTPS.
+
+Limitaciones observadas: un enlace de Vimeo solo permitió recuperar la imagen de su HTML, y un ejemplo de vídeo del W3C se analizó pero su servidor rechazó la descarga del archivo. No se consideran plataformas o descargas de vídeo verificadas. No se ha comprobado individualmente cada extractor de yt-dlp, cada formato admitido ni una Raspberry Pi física. Sigue sin haber soporte para DRM, cuentas privadas, sesiones de usuario o ejecución de JavaScript de páginas para detectar imágenes.
+
+El servidor y el túnel temporal existentes se mantienen activos con la versión actualizada. Esta verificación se realizó antes de publicar la actualización en GitHub.

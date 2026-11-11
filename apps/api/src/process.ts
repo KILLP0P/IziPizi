@@ -6,23 +6,26 @@ import { AppError, aborted } from './errors.js';
 export async function runProcess(bin: string, args: string[], signal: AbortSignal, maxOutput = 8 * 1024 * 1024): Promise<string> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, args, { shell: false, stdio: ['ignore','pipe','pipe'], env: {
+    const proxyIndex = args.indexOf('--proxy');const proxy = proxyIndex >= 0 ? args[proxyIndex+1] : undefined;
+    const child = spawn(bin, args, { shell: false, detached:process.platform !== 'win32', stdio: ['ignore','pipe','pipe'], env: {
       PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'en_US.UTF-8',
+      ...(proxy ? {http_proxy:proxy,https_proxy:proxy,all_proxy:proxy,no_proxy:'',HTTP_PROXY:proxy,HTTPS_PROXY:proxy,ALL_PROXY:proxy,NO_PROXY:''} : {}),
       // No inherited HTTP proxies, cookies, plugins or user yt-dlp configuration.
     } });
     let output = ''; let error = ''; let size = 0; let failure: Error | undefined;
-    const stop = () => { failure ??= aborted(); child.kill('SIGKILL'); };
+    const kill = () => {try {if (process.platform !== 'win32' && child.pid) process.kill(-child.pid,'SIGKILL');else child.kill('SIGKILL');} catch { /* already exited */ }};
+    const stop = () => {failure ??= aborted();kill();};
     signal.addEventListener('abort', stop, { once: true });
     if (signal.aborted) stop();
-    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maxOutput) { failure = new AppError('OUTPUT_LIMIT','La respuesta del extractor es demasiado grande.',422); child.kill('SIGKILL'); } else output += chunk.toString(); });
+    child.stdout.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maxOutput) { failure = new AppError('OUTPUT_LIMIT','La respuesta del extractor es demasiado grande.',422); kill(); } else output += chunk.toString(); });
     child.stderr.on('data', (chunk: Buffer) => { error = (error + chunk.toString()).slice(-8000); });
     child.on('error', () => { signal.removeEventListener('abort', stop); reject(new AppError('DEPENDENCY_MISSING',`No se puede ejecutar ${bin.includes('ffmpeg') ? 'FFmpeg' : 'yt-dlp'}. Ejecuta pnpm run doctor.`,503)); });
     child.on('close', code => {
       signal.removeEventListener('abort', stop);
       if (failure) return reject(failure);
       if (code !== 0) return reject(new AppError('EXTRACTION_FAILED', /private|protected|login|not authorized|unavailable|not found|404|403/i.test(error)
-        ? 'La publicación no está disponible sin iniciar sesión o tiene restricciones de acceso.'
-        : 'No se ha podido obtener el contenido de X. Prueba más tarde o actualiza yt-dlp.',422));
+        ? 'El contenido no está disponible sin iniciar sesión o tiene restricciones de acceso.'
+        : 'No se ha podido obtener el contenido. El sitio puede no ser compatible o requerir acceso privado.',422));
       resolve(output);
     });
   });

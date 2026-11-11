@@ -1,24 +1,20 @@
 import { z } from 'zod';
-import type { Media, Quality } from '@izipizi/shared';
+import type { Quality } from '@izipizi/shared';
 import { AppError } from './errors.js';
-import { checkedUrl, createEgressProxy, safeBuffer } from './network.js';
+import { checkedUrl, createEgressProxy, safeBuffer, safeResponse, readLimited, resolvePublic } from './network.js';
 import { runProcess } from './process.js';
 import type { Config } from './config.js';
-
-export interface SourceQuality { public: Quality; url: string }
-export interface SourceMedia { public: Media; thumbnail?: string; qualities: SourceQuality[] }
-export interface Extracted { title: string; author?: string; media: SourceMedia[]; warnings: string[] }
-const num = z.number().nonnegative().nullish();
-const str = z.string().nullish();
-const variantSchema = z.object({ url: z.string(), content_type: str, bitrate: num });
-const detailSchema = z.object({ type: z.string(), media_url_https: str, original_info: z.object({ width: num, height: num }).nullish(), video_info: z.object({ duration_millis: num, variants: z.array(variantSchema).optional() }).nullish() });
-const tweetSchema = z.object({ text: str, user: z.object({ name: str }).optional(), mediaDetails: z.array(detailSchema).max(16).optional() });
-const formatSchema = z.object({ url: str, ext: str, protocol: str, height: num, width: num, tbr: num, vcodec: str, acodec: str, filesize: num });
-const entrySchema = z.object({ title: str, uploader: str, duration: num, thumbnail: str, formats: z.array(formatSchema).max(300).optional() });
-const infoSchema = entrySchema.extend({ entries: z.array(entrySchema).max(16).optional() });
+import { contentExtension, sourceForUrl, type SourceQuality, type SourceMedia, type Extracted } from './media.js';
+import { fromHtml } from './html.js';
+import { fromYtdlp } from './ytdlp.js';
+export { fromYtdlp } from './ytdlp.js';
+export type { SourceQuality, SourceMedia, Extracted } from './media.js';
+const num = z.number().nonnegative().nullish();const str = z.string().nullish();
+const variantSchema = z.object({url:z.string(),content_type:str,bitrate:num});
+const detailSchema = z.object({type:z.string(),media_url_https:str,original_info:z.object({width:num,height:num}).nullish(),video_info:z.object({duration_millis:num,variants:z.array(variantSchema).optional()}).nullish()});
+const tweetSchema = z.object({text:str,user:z.object({name:str}).optional(),mediaDetails:z.array(detailSchema).max(16).optional()});
 function safeMedia(raw: string | null | undefined): string | undefined {
-  if (!raw) return undefined;
-  try { return checkedUrl(raw, true).href; } catch { return undefined; }
+ if (!raw) return undefined;try {return checkedUrl(raw).href;} catch {return undefined;}
 }
 function videoMedia(index: number, variants: { url: string; height?: number; width?: number; bitrate?: number; bytes?: number }[], kind: 'video' | 'gif', thumbnail?: string, duration?: number): SourceMedia | undefined {
   const sorted = variants.filter(v => safeMedia(v.url)).sort((a,b) => (b.height ?? b.bitrate ?? 0) - (a.height ?? a.bitrate ?? 0));
@@ -29,17 +25,6 @@ function videoMedia(index: number, variants: { url: string; height?: number; wid
   const first = unique[0]!;
   const preview = safeMedia(thumbnail);
   return { public: { id: `m${index}`, kind, qualities: qualities.map(q => q.public), ...(first.width ? { width: first.width } : {}), ...(first.height ? { height: first.height } : {}), ...(duration ? { duration } : {}) }, qualities, ...(preview ? { thumbnail: preview } : {}) };
-}
-export function fromYtdlp(raw: unknown): Extracted {
-  const info = infoSchema.parse(raw);
-  const entries = info.entries ?? [info];
-  const media: SourceMedia[] = [];
-  for (const entry of entries) {
-    const variants = (entry.formats ?? []).filter(f => f.ext === 'mp4' && f.vcodec !== 'none' && (f.acodec !== 'none' || f.url?.includes('/tweet_video/')) && f.url && /^https:/.test(f.url) && (!f.protocol || f.protocol === 'https' || f.protocol === 'http')).map(f => ({ url: f.url!, ...(f.height ? { height: f.height } : {}), ...(f.width ? { width: f.width } : {}), ...(f.tbr ? { bitrate: f.tbr * 1000 } : {}), ...(f.filesize ? { bytes: f.filesize } : {}) }));
-    const item = videoMedia(media.length, variants, variants.some(v => new URL(v.url).pathname.startsWith('/tweet_video/')) ? 'gif' : 'video', entry.thumbnail ?? undefined, entry.duration ?? undefined);
-    if (item) media.push(item);
-  }
-  return { title: (info.title ?? 'Publicación de X').slice(0,500), ...(info.uploader ? { author: info.uploader.slice(0,100) } : {}), media, warnings: [] };
 }
 export function fromSyndication(raw: unknown): Extracted {
   const tweet = tweetSchema.parse(raw);
@@ -63,39 +48,64 @@ export function fromSyndication(raw: unknown): Extracted {
   }
   return { title: (tweet.text ?? 'Publicación de X').slice(0,500), ...(tweet.user?.name ? { author: tweet.user.name.slice(0,100) } : {}), media, warnings: [] };
 }
+export const extractorArgs = ['--ignore-config','--no-plugin-dirs','--no-cache-dir','--no-cookies','--socket-timeout','12','--retries','0','--extractor-retries','0'];
 export async function extract(url: string, signal: AbortSignal, config: Config): Promise<Extracted> {
-  const id = url.split('/').at(-1)!;
-  let publicData: Extracted | undefined;
-  try {
-    const token = ((Number(id) / 1e15) * Math.PI).toString(36).replace(/(0+|\.)/g,'');
-    const response = await safeBuffer(`https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${token}`, signal, 2 * 1024 * 1024, false);
-    publicData = fromSyndication(JSON.parse(response.data.toString()));
-  } catch { signal.throwIfAborted(); /* yt-dlp remains the fallback for public videos */ }
-  if (publicData?.media.length && publicData.media.every(m => m.public.kind === 'image')) return publicData;
+  const input = checkedUrl(url);await resolvePublic(input.hostname);signal.throwIfAborted();
+  const isX = input.hostname === 'x.com' || input.hostname === 'twitter.com';
+  let publicData: Extracted | undefined;let htmlData: Extracted | undefined;
+  if (isX) {
+    const id = input.pathname.split('/').at(-1)!;
+    try {
+      const token = ((Number(id)/1e15)*Math.PI).toString(36).replace(/(0+|\.)/g,'');
+      const response = await safeBuffer(`https://cdn.syndication.twimg.com/tweet-result?id=${id}&token=${token}`,signal,2*1024*1024);
+      publicData = fromSyndication(JSON.parse(response.data.toString()));
+    } catch {signal.throwIfAborted();}
+    if (publicData?.media.length && publicData.media.every(m => m.public.kind === 'image')) return publicData;
+  } else {
+    try {
+      const response = await safeResponse(url,signal,config.MAX_FILE_MB*1024*1024);
+      const ext = contentExtension(response);
+      if (ext) {
+        response.destroy();
+        const target = response.url ?? url;
+        const direct = sourceForUrl(target,ext);if ((response.headers['content-type'] ?? '').startsWith('audio/')) direct.public.kind = 'audio';
+        return {title:decodeURIComponent(new URL(target).pathname.split('/').at(-1) || input.hostname).slice(0,500),media:[direct],warnings:[]};
+      }
+      if (/^(?:text\/html|application\/xhtml\+xml)(?:;|$)/i.test(response.headers['content-type'] ?? '')) {
+        htmlData = fromHtml((await readLimited(response,2*1024*1024)).toString('utf8'),response.url ?? url);
+      } else response.destroy();
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof AppError && ['UNSAFE_URL','UNSAFE_ADDRESS'].includes(error.code)) throw error;
+    }
+  }
   const proxy = await createEgressProxy(signal);
   try {
-    const output = await runProcess(config.YTDLP_BIN, ['--ignore-config','--no-plugin-dirs','--no-cache-dir','--no-cookies','--socket-timeout','12','--retries','0','--extractor-retries','0','--proxy',proxy.url,'--extractor-args','twitter:api=syndication','--skip-download','--dump-single-json','--no-warnings','--yes-playlist','--',url],signal);
+    const output = await runProcess(config.YTDLP_BIN,[...extractorArgs,'--proxy',proxy.url,
+      ...(isX ? ['--extractor-args','twitter:api=syndication'] : []),
+      '--skip-download','--dump-single-json','--no-warnings','--no-playlist','--playlist-end','16','--',url],signal);
+    if (proxy.error) throw proxy.error;
     const extracted = fromYtdlp(JSON.parse(output));
-    // The public endpoint preserves original media order, animated-GIF identity and photos.
     if (publicData?.media.length) {
-      // Prefer yt-dlp's measured formats when they describe the same media,
-      // retaining publication order, original IDs and GIF identity from X.
       for (const media of publicData.media) {
         if (media.public.kind === 'image') continue;
         const paths = new Set(media.qualities.map(q => new URL(q.url).pathname));
         const match = extracted.media.find(item => item.qualities.some(q => paths.has(new URL(q.url).pathname)));
         if (match) {
-          media.qualities = match.qualities.map(q => ({ ...q, public: media.public.kind === 'gif' ? { id:q.public.id, label:q.public.label, extension:'gif' as const } : q.public }));
-          media.public = { ...match.public, id: media.public.id, kind: media.public.kind, qualities:media.qualities.map(q => q.public) };
+          media.qualities = match.qualities.map(q => ({...q,public:media.public.kind === 'gif' ? {id:q.public.id,label:q.public.label,extension:'gif' as const} : q.public}));
+          media.public = {...match.public,id:media.public.id,kind:media.public.kind,qualities:media.qualities.map(q => q.public)};
         }
       }
       return publicData;
     }
-    if (!extracted.media.length) throw new AppError('NO_MEDIA','No encontramos vídeos, GIFs o imágenes descargables en esta publicación.',422);
-    return extracted;
+    if (extracted.media.length) return extracted;
+    if (htmlData?.media.length) return htmlData;
+    throw new AppError('NO_MEDIA','No encontramos medios descargables. El sitio puede necesitar sesión, tener DRM o no ser compatible.',422);
   } catch (error) {
     signal.throwIfAborted();
-    if (publicData?.media.length) { publicData.warnings.push('Se ha utilizado la información pública de X porque yt-dlp no pudo completar el análisis.'); return publicData; }
+    if (proxy.error) throw proxy.error;
+    if (publicData?.media.length) {publicData.warnings.push('Se ha utilizado la información pública de X porque yt-dlp no pudo completar el análisis.');return publicData;}
+    if (htmlData?.media.length && !(error instanceof AppError && error.code === 'LIVE_UNSUPPORTED')) return htmlData;
     throw error;
-  } finally { proxy.close(); }
+  } finally {proxy.close();}
 }

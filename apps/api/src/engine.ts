@@ -12,6 +12,8 @@ import { extract, type Extracted } from './extractor.js';
 import { Gate } from './limits.js';
 import { safeBuffer, safeResponse } from './network.js';
 import { runProcess, runProcessToFile } from './process.js';
+import { nativeDownload } from './native-download.js';
+import { contentExtension, mediaKind, mimeByExtension } from './media.js';
 
 interface Session { result: Extracted; analysis: Analysis; expires: number }
 export interface Download { path: string; filename: string; type: string; size: number; cleanup: () => Promise<void> }
@@ -52,8 +54,8 @@ export class DownloadEngine implements Engine {
    return this.previewGate.run(async () => {
      const media = this.get(sessionId,mediaId);
      if (!media.thumbnail) throw new AppError('NO_PREVIEW','Vista previa no disponible.',404);
-     const preview = await safeBuffer(media.thumbnail,signal,5 * 1024 * 1024);
-     if (!/^image\/(jpeg|png|webp)(;|$)/.test(preview.type)) throw new AppError('INVALID_MEDIA','Vista previa no disponible.',422);
+     const preview = await safeBuffer(media.thumbnail,signal,5 * 1024 * 1024,media.qualities[0]?.headers);
+     if (!/^image\/(jpeg|png|webp|gif|avif)(;|$)/.test(preview.type)) throw new AppError('INVALID_MEDIA','Vista previa no disponible.',422);
      return preview;
    });
  }
@@ -67,16 +69,42 @@ export class DownloadEngine implements Engine {
      const dir = await mkdtemp(join(this.config.TEMP_ROOT ?? tmpdir(),'izipizi-')); this.tempDirs.add(dir);
      const cleanup = async () => { await rm(dir,{ recursive: true, force: true }); this.tempDirs.delete(dir); };
      try {
-       const ext = quality.public.extension; const input = join(dir,`source.${media.public.kind === 'gif' ? 'mp4' : ext}`);
-       const response = await safeResponse(quality.url,signal,max);
-       const type = response.headers['content-type'] ?? '';
-       const expected = ext === 'mp4' || media.public.kind === 'gif' ? /^video\/mp4(?:;|$)/ : /^image\/(?:jpeg|png|webp)(?:;|$)/;
-       if (!expected.test(type)) { response.destroy(); throw new AppError('INVALID_MEDIA','El servidor no ha entregado un archivo multimedia válido.',422); }
-       let size = 0;
-       const limit = new Transform({ transform(chunk: Buffer, _encoding, cb) { size += chunk.length; cb(size > max ? new AppError('FILE_TOO_LARGE','El archivo supera el límite de tamaño.',413) : null,chunk); } });
-       await pipeline(response,limit,createWriteStream(input,{ flags: 'wx', mode: 0o600 }),{ signal });
+       let ext = quality.public.extension;
+       let input: string;
+       if (quality.plan) {
+         input = await nativeDownload(quality.plan,dir,signal,max,this.config);
+       } else {
+         const convertedGif = media.public.kind === 'gif' && media.gifSource !== 'gif';
+         input = join(dir,`source.${convertedGif ? 'mp4' : ext}`);
+         const response = await safeResponse(quality.url,signal,max,0,quality.headers);
+         const type = (response.headers['content-type'] ?? '').split(';')[0]!.toLowerCase();
+         const actual = contentExtension(response);
+         const expectedKind = convertedGif ? 'video' : media.public.kind === 'gif' ? 'image' : media.public.kind;
+         const actualKind = actual ? mediaKind(actual) : undefined;
+         if (actual && ((expectedKind === 'image' && ['image','gif'].includes(actualKind!)) || expectedKind === actualKind || (expectedKind === 'audio' && ['audio/webm','video/webm','video/mp4'].includes(type)))) {
+           if (!convertedGif && !(expectedKind === 'audio' && ['mp4','webm'].includes(actual))) ext = actual;
+         } else if (type !== 'application/octet-stream' && type !== 'binary/octet-stream') {
+           response.destroy();throw new AppError('INVALID_MEDIA','El sitio no ha entregado un archivo multimedia compatible.',422);
+         }
+         let size = 0;
+         const limit = new Transform({transform(chunk: Buffer,_encoding,cb) {size += chunk.length;cb(size > max ? new AppError('FILE_TOO_LARGE','El archivo supera el límite de tamaño.',413) : null,chunk);}});
+         await pipeline(response,limit,createWriteStream(input,{flags:'wx',mode:0o600}),{signal});
+       }
+       // Probe the downloaded bytes, not just an extension or upstream MIME type.
+       const metadata = JSON.parse(await runProcess(this.config.FFPROBE_BIN,[
+         '-v','error','-protocol_whitelist','file','-format_whitelist','mov,matroska,webm,gif,jpeg_pipe,png_pipe,webp_pipe,mp3,aac,wav,flac,ogg,mpegts',
+         '-show_entries','stream=codec_type,codec_name','-of','json',input,
+       ],signal,256*1024)) as {streams?: {codec_type?:string;codec_name?:string}[]};
+       const expectedStream = media.public.kind === 'audio' ? 'audio' : 'video';
+       if (!metadata.streams?.some(stream => stream.codec_type === expectedStream)) throw new AppError('INVALID_MEDIA','El archivo recibido no contiene el tipo de medio esperado.',422);
+       if (media.public.kind === 'image' || media.gifSource === 'gif') {
+         const codec = metadata.streams.find(stream => stream.codec_type === 'video')?.codec_name;
+         const images = {mjpeg:'jpg',png:'png',webp:'webp',gif:'gif',av1:'avif'} as const;
+         if (!codec || !(codec in images)) throw new AppError('INVALID_MEDIA','El archivo recibido no es una imagen compatible.',422);
+         ext = images[codec as keyof typeof images];
+       }
        let path = input;
-       if (media.public.kind === 'gif') {
+       if (media.public.kind === 'gif' && media.gifSource !== 'gif') {
          path = join(dir,'ready.gif');
          await runProcessToFile(this.config.FFMPEG_BIN,[
            '-nostdin','-v','error','-threads','2','-filter_complex_threads','1',
@@ -91,7 +119,7 @@ export class DownloadEngine implements Engine {
        }
        const info = await stat(path);
        if (!info.size || info.size > max) throw new AppError('FILE_TOO_LARGE','El archivo no cumple el límite de tamaño.',413);
-       return { path, filename: `izipizi-${mediaId}.${ext}`, type: ext === 'mp4' ? 'video/mp4' : `image/${ext === 'jpg' ? 'jpeg' : ext}`, size: info.size, cleanup };
+       return { path, filename: `izipizi-${mediaId}.${ext}`, type: media.public.kind === 'audio' && ext === 'webm' ? 'audio/webm' : mimeByExtension[ext], size: info.size, cleanup };
      } catch (error) { await cleanup(); throw error; }
    });
  }

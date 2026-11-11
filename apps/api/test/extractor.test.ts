@@ -11,9 +11,9 @@ describe('media extraction',() => {
  it('rejects unsafe media URLs from untrusted upstream metadata',() => {
   expect(fromSyndication({mediaDetails:[{type:'photo',media_url_https:'https://127.0.0.1/private'}]}).media).toHaveLength(0);
  });
- it('accepts yt-dlp playlists and only complete direct MP4 formats',() => {
-  const result = fromYtdlp({title:'hello',entries:[{formats:[{url:'https://video.twimg.com/a.mp4',ext:'mp4',protocol:'https',height:720},{url:'https://video.twimg.com/audio.mp4',ext:'mp4',vcodec:'none'},{url:'https://video.twimg.com/a.m3u8',ext:'mp4',protocol:'m3u8_native'},{url:'https://evil.com/v.mp4',ext:'mp4'}]}]});
-  expect(result.media).toHaveLength(1); expect(result.media[0]!.qualities).toHaveLength(1);
+ it('accepts yt-dlp playlists and direct and adaptive formats from general public domains',() => {
+  const result = fromYtdlp({title:'hello',entries:[{formats:[{url:'https://video.twimg.com/a.mp4',ext:'mp4',protocol:'https',height:720},{url:'https://video.twimg.com/audio.mp4',ext:'mp4',vcodec:'none'},{url:'https://video.twimg.com/a.m3u8',ext:'mp4',protocol:'m3u8_native'},{url:'http://127.0.0.1/v.mp4',ext:'mp4'}]}]});
+  expect(result.media).toHaveLength(2); expect(result.media[0]!.qualities).toHaveLength(2);
  });
 });
 

@@ -1,15 +1,17 @@
 # IziPizi
 
-Pega un enlace público de X y descarga sus vídeos, GIFs e imágenes. Aplicación local, open source y sin cuentas. React + TypeScript + Vite + Tailwind, Fastify, Zod, yt-dlp y FFmpeg.
+Pega el enlace de una página pública, plataforma compatible o archivo multimedia y descarga sus vídeos, audio, GIFs e imágenes. Aplicación open source y self-hosted, sin cuentas ni historial. React + TypeScript + Vite + Tailwind, Fastify, Zod, yt-dlp y FFmpeg.
+
+**La compatibilidad es amplia, no universal.** Se utilizan los [extractores de yt-dlp](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md), detección de medios en HTML estático y enlaces directos. No se eluden sesiones, contenido privado, DRM ni bloqueos de acceso. Consulta [compatibilidad y formatos](docs/compatibility.md).
 
 ## Ejecutar en macOS (Apple Silicon)
 
-Requisitos: Homebrew, Node.js **24 LTS**, pnpm, yt-dlp y FFmpeg.
+Requisitos: Homebrew, Node.js **24 LTS**, pnpm, yt-dlp, FFmpeg y FFprobe (incluido con FFmpeg).
 
 ```sh
 brew install node@24 pnpm yt-dlp ffmpeg
 export PATH="/opt/homebrew/opt/node@24/bin:/opt/homebrew/bin:$PATH"
-cd /Users/marcelo/Documents/Codex/IziPizi
+cd /ruta/a/IziPizi
 pnpm install
 pnpm run doctor
 pnpm dev
@@ -19,11 +21,11 @@ Abre **http://localhost:5173**. La API escucha únicamente en `127.0.0.1:3001`; 
 
 Si Homebrew no está en tu PATH, también puedes arrancar con `./scripts/dev.sh`. Este lanzador ajusta el PATH solo para su propio proceso, sin modificar tu configuración de shell.
 
-1. Copia un enlace como `https://x.com/usuario/status/123456789`.
+1. Copia el enlace de un vídeo, página pública o archivo multimedia.
 2. Pégalo y pulsa **Obtener archivos**.
 3. Selecciona calidad si hay varias y pulsa **Descargar** en el archivo deseado.
 
-Las publicaciones con varios elementos muestran una tarjeta por archivo. Los GIFs de X se convierten a **archivos `.gif` animados** con reproducción en bucle. La conversión utiliza hasta 15 fps y 640 px por lado, sin ampliar imágenes pequeñas, para moderar tamaño y consumo de memoria.
+Los enlaces con varios elementos muestran una tarjeta por archivo, hasta 16 resultados. Los formatos adaptativos HLS/DASH se descargan con yt-dlp y las pistas separadas se unen localmente con FFmpeg. Los GIFs de X se convierten a **archivos `.gif` animados** con reproducción en bucle. La conversión utiliza hasta 15 fps y 640 px por lado, sin ampliar imágenes pequeñas, para moderar tamaño y consumo de memoria.
 
 ## Probar desde el móvil en la misma red
 
@@ -44,14 +46,14 @@ Para volver al modo exclusivo del Mac, elimina estas opciones de `.env` o config
 | Comando | Resultado |
 | --- | --- |
 | `pnpm dev` | Frontend y API con recarga |
-| `pnpm run doctor` | Verifica las cuatro herramientas; usar `run` para evitar el comando interno de pnpm |
+| `pnpm run doctor` | Verifica las herramientas requeridas; usar `run` para evitar el comando interno de pnpm |
 | `pnpm typecheck` | TypeScript estricto en todos los paquetes |
 | `pnpm lint` | ESLint |
 | `pnpm test` | Tests unitarios y de integración, independientes de X |
 | `pnpm build` | Frontend y backend de producción |
 | `pnpm check` | Tipos, lint, tests y build |
 | `pnpm start` | Sirve el build completo en http://localhost:3001 |
-| `MEDIADROP_TEST_URL=https://x.com/usuario/status/ID pnpm run smoke` | Prueba real contra la API en marcha; descarga, verifica y borra el archivo de prueba |
+| `IZIPIZI_TEST_URL=https://x.com/usuario/status/ID pnpm run smoke` | Prueba real contra la API en marcha; descarga, verifica y borra el archivo de prueba |
 
 Para probar el build local: detén `pnpm dev`, ejecuta `pnpm build && pnpm start` y abre http://localhost:3001. No hace falta Vite en este modo.
 
@@ -72,19 +74,20 @@ Por defecto: **100 MiB por archivo, 120 s por operación, 2 operaciones simultá
 
 Los archivos se guardan en directorios temporales privados y se borran al terminar la respuesta, cancelar, fallar o cerrar el servidor de forma normal. Un barrido inicial elimina directorios de trabajos abandonados de esta aplicación con más de una hora de antigüedad. No hay almacenamiento permanente ni base de datos.
 
-Solo se admiten enlaces HTTPS de publicaciones de `x.com` y `twitter.com` y sus variantes explícitas `www`, `m` y `mobile`. Se descartan parámetros de seguimiento. No se admiten acortadores `t.co`, perfiles, espacios, emisiones en directo ni enlaces externos incluidos en una publicación.
+Se admiten enlaces HTTP/HTTPS con dominios públicos y puertos web estándar. Se rechazan IPs literales, credenciales en las URLs, nombres locales y destinos que resuelvan a redes internas o direcciones reservadas. Cada conexión y redirección se valida de nuevo. Los parámetros de URLs normales se conservan para no romper enlaces firmados; los enlaces de X se normalizan sin seguimiento.
 
 ## Limitaciones conocidas
 
-- X puede retirar publicaciones, limitar peticiones o exigir sesión. IziPizi no utiliza cuentas, cookies ni técnicas para eludir restricciones; no todo enlace público será accesible anónimamente.
-- yt-dlp extrae metadatos de vídeo. Las fotos, el orden de elementos y la identidad de los GIFs se obtienen del endpoint público de sindicación de X, que puede omitir medios y cambiar sin aviso. Si yt-dlp falla pero el endpoint ofrece variantes MP4 públicas, se muestran con un aviso.
-- Esta fase admite las variantes **MP4 directas** y las fotos JPEG/PNG/WebP. No descarga HLS, DASH, contenido DRM, vídeos con audio separado ni galerías de enlaces externos. FFmpeg remultiplexa los vídeos MP4 sin recodificar y convierte las animaciones de X a GIF con una paleta optimizada.
-- La conversión a GIF puede tardar más y producir archivos mayores que el MP4 de origen. Se aplican los mismos límites de tiempo y tamaño; si se superan, se muestra un error sin entregar un archivo incompleto.
-- No hay botón ZIP ni descarga masiva: cada archivo se guarda desde su tarjeta.
-- La descarga se prepara primero en el servidor; el navegador recibe después un Blob completo. En móviles, el límite de memoria del navegador puede aconsejar una calidad inferior.
-- Los límites y las sesiones son locales a un proceso. No está preparado como servicio público permanente ni para múltiples réplicas. El despliegue definitivo en Raspberry Pi queda para la siguiente fase.
+- No se garantiza una página o plataforma concreta: pueden exigir sesión, restringir regiones, retirar medios o cambiar su implementación. No se cargan cookies ni credenciales del navegador.
+- El análisis HTML detecta imágenes, etiquetas de vídeo/audio, metadatos Open Graph y enlaces directos. No ejecuta JavaScript, no inicia un navegador ni recorre todas las páginas de un sitio. Puede incluir imágenes de la interfaz del sitio, no solo su contenido principal.
+- Se muestran hasta 16 archivos y se limita el tamaño de páginas y metadatos. No se descargan emisiones en directo, DRM, SVG, formatos desconocidos ni protocolos no web.
+- La calidad depende de lo que el sitio publique anónimamente. Los vídeos con audio separado se unen cuando existe una pista compatible; los formatos incompatibles se omiten. El audio se entrega en su formato original, sin convertirlo todo a MP3.
+- Los GIFs directos conservan su archivo original. Las animaciones de X almacenadas como MP4 se convierten a GIF con hasta 15 fps y 640 px por lado. Una conversión puede tardar más o superar el límite: se devuelve un error y se limpian los temporales.
+- No hay ZIP ni descarga masiva. Cada archivo se guarda desde su tarjeta.
+- El navegador recibe un Blob completo después de preparar el archivo. En móviles, una calidad inferior puede reducir el uso de memoria.
+- Los límites y sesiones pertenecen a un proceso. La demo por túnel es temporal; el despliegue permanente y la validación física de Raspberry Pi quedan pendientes.
 
-Si algo falla, ejecuta `pnpm run doctor`. Para cambios del extractor: `brew upgrade yt-dlp`. Consulta [arquitectura](docs/architecture.md), [seguridad](docs/security.md) y [verificación](docs/verification.md).
+Si algo falla, ejecuta `pnpm run doctor`. Para actualizar el extractor: `brew upgrade yt-dlp`. Consulta [arquitectura](docs/architecture.md), [seguridad](docs/security.md) y [verificación](docs/verification.md).
 
 ## Licencia
 

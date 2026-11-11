@@ -1,31 +1,31 @@
 # Seguridad y ciclo de vida
 
-## Frontera de entrada
+## Entrada y servicio
 
-Los esquemas Zod son estrictos: no aceptan opciones arbitrarias de yt-dlp, cookies, rutas de salida ni URLs de archivos. El esquema de enlaces acepta únicamente HTTPS, dominios explícitos y rutas de publicaciones con ID numérico. Rechaza credenciales, puertos alternativos, perfiles y acortadores.
+Se aceptan URLs públicas HTTP/HTTPS, sin credenciales, IPs literales ni puertos alternativos. Se rechazan nombres locales/reservados y esquemas no web. Los esquemas Zod son estrictos y no aceptan cookies, rutas, URLs de descarga ni argumentos de procesos proporcionados por el cliente.
 
-La API escucha en loopback por defecto, valida el Host para evitar DNS rebinding y no habilita CORS. Rechaza orígenes ajenos y peticiones de navegador marcadas `cross-site`. Se usan cabeceras de seguridad, CSP en producción, `no-store` y `no-referrer`. `trustProxy` está deshabilitado: no se confía en cabeceras de IP aportadas por el cliente.
+Loopback es el valor por defecto. Para LAN y el túnel temporal se admiten exclusivamente los Hosts y orígenes configurados en `WEB_ORIGIN` y `PUBLIC_ORIGIN`, además de localhost. No se habilita CORS ni confianza en cabeceras de IP (`trustProxy:false`). Las solicitudes del túnel comparten los límites de su conector. CSP, `no-store`, `no-referrer` y la ausencia de logs de peticiones protegen el flujo local; Cloudflare es un intermediario adicional al utilizar el túnel público.
 
-## Frontera de red
+## Red general y SSRF
 
-La lista de destinos es exacta, nunca una coincidencia libre por sufijo. El análisis permite los endpoints públicos conocidos de X/Twitter; la descarga y las previsualizaciones solo `video.twimg.com` y `pbs.twimg.com`.
+La versión general no limita todos los destinos a X: exige nombres DNS públicos y comprueba **todas las direcciones A/AAAA** en cada conexión. Rechaza redes privadas, reservadas, loopback, link-local, multicast e IPv4 mapeada en IPv6. Las peticiones Node fijan la conexión a una IP comprobada y TLS sigue verificando el nombre original. Cada redirección se revalida, con un máximo de tres para peticiones Node.
 
-Cada petición Node valida URL y redirecciones (máximo 3), resuelve todos los registros A/AAAA y rechaza direcciones privadas, reservadas, loopback, link-local, multicast y IPv4 mapeada en IPv6. La conexión se fija a una IP validada y TLS verifica el nombre original, evitando una segunda resolución vulnerable a rebinding.
+yt-dlp recibe un proxy temporal en loopback. El proxy valida tanto solicitudes HTTP al puerto 80 como CONNECT HTTPS al 443; resuelve y fija la IP de cada conexión, incluidas redirecciones, manifiestos, claves y fragmentos. Hay límites de bytes agregados y de solicitudes. Se fijan las variables de proxy del proceso y se vacía `no_proxy` para evitar exclusiones heredadas o del sistema. Los clientes no pueden elegir el proxy.
 
-yt-dlp recibe un proxy HTTP temporal en loopback. Solo admite CONNECT a destinos explícitos y puerto 443, aplica la misma validación DNS y fija la IP. El tráfico de análisis se limita a 16 MiB. Las peticiones HTTP en texto claro y los dominios de redirección no permitidos se rechazan. No se utiliza un extractor genérico para descargar enlaces externos. No se entregan URLs remotas a FFmpeg. La salida GIF se transmite mediante una tubería con backpressure y límite estricto de bytes; superar el límite mata el proceso y elimina los temporales, sin entregar animaciones truncadas.
+Los planes de descarga se reconstruyen con campos permitidos; se filtran protocolos, DRM, URLs y fragmentos peligrosos. No se habilitan URLs `file://` en yt-dlp, configuración del usuario, plugins, cookies ni credenciales del navegador. La detección HTML no ejecuta scripts ni rastrea páginas enlazadas.
 
-Esta frontera se aplica al tráfico realizado por los componentes configurados de la aplicación. No sustituye el aislamiento del sistema operativo frente a un binario comprometido ni a modificaciones locales del código.
+## Procesos y archivos
 
-## Recursos y archivos
+`spawn` usa argumentos separados y `shell:false`. La cancelación mata el grupo de procesos en macOS/Linux, incluidos procesos de unión o runtimes hijos. Los wrappers de FFmpeg/FFprobe generados para cada trabajo solo admiten entradas `file,pipe`, incluso si yt-dlp intenta delegar un manifiesto a FFmpeg. Los procesos directos de conversión/verificación también restringen protocolos y formatos. Ningún usuario puede suministrar argumentos de estas herramientas.
 
-Límites de cuerpo HTTP, solicitudes por minuto, respuesta de metadatos, bytes de red, tamaño de archivo, tiempo y concurrencia. No hay cola ilimitada. Los slots de archivos preparados permanecen limitados mientras se entregan al cliente. Las sesiones tienen TTL y capacidad máxima.
+Los límites normales son 100 MiB por archivo, 120 segundos por trabajo y dos trabajos simultáneos. El análisis HTML se limita a 2 MiB, los metadatos/stdout y el proxy tienen presupuestos, y solo se muestran 16 archivos. El descargador adaptativo limita el tamaño conocido, el tráfico agregado y vigila el espacio temporal; tras terminar se comprueba de nuevo el tamaño del archivo entregado. Esto no sustituye una cuota de disco del sistema operativo: entre comprobaciones puede existir un exceso transitorio acotado por el tráfico permitido. La salida GIF se escribe por streaming con backpressure y un límite de bytes estricto.
 
-Los procesos se ejecutan con `spawn`, argumentos separados y `shell:false`. yt-dlp ignora configuración del usuario, plugins y caché; no se cargan credenciales. FFmpeg solo admite el contenedor MOV/MP4 de entrada y el protocolo local `file`. Sus referencias externas están deshabilitadas.
+`mkdtemp` crea directorios privados, los archivos usan creación exclusiva y modo 0600, y los nombres de salida son propios. FFprobe verifica el medio descargado antes de entregarlo. Los parciales y pistas intermedias se limpian al fallar, cancelar, terminar la respuesta o apagar normalmente. Un barrido al iniciar limpia trabajos propios abandonados de más de una hora, sin seguir symlinks ni borrar directorios de otros usuarios.
 
-`mkdtemp` crea directorios privados; los archivos de origen usan `wx` y modo 0600. Los nombres descargados los genera la aplicación. Se eliminan archivos parciales ante errores; terminar/cancelar la respuesta también limpia el directorio. Al apagar normalmente se abortan trabajos y se limpian directorios. El arranque barre trabajos propios abandonados con más de una hora, sin seguir enlaces simbólicos ni tocar directorios de otros usuarios.
+## Alcance operativo
 
-No se registran cuerpos de peticiones, enlaces, títulos ni IPs. Los metadatos públicos solo permanecen en memoria durante la sesión. El navegador guarda únicamente el tema; el archivo descargado queda en el dispositivo por decisión del usuario.
+La frontera de red protege frente a URLs, DNS, metadatos y manifiestos no confiables; no sustituye un sandbox de SO frente a binarios comprometidos o modificaciones locales. Los procesos confiables y sus dependencias deben mantenerse actualizados.
 
-## Antes de una exposición pública futura
+No se guardan enlaces ni medios permanentemente en el servidor. Las sesiones permanecen en memoria durante diez minutos, con un máximo de cien. El navegador guarda solo el tema y los archivos que el usuario decide descargar.
 
-El ejemplo ARM64 conserva el alcance local. Una versión pública necesitará TLS de entrada, configuración explícita de orígenes/hosts/proxy, límites de disco/contenedor y revisión operativa. No habilitar `HOST=0.0.0.0` en el host sin completar esa fase.
+La demo temporal conserva límites, pero no equivale a un servicio público permanente. El despliegue definitivo requiere aislamiento, cuotas de disco/memoria/CPU, TLS de entrada y revisión operativa. Los ejemplos ARM64 no se han validado en una Raspberry Pi física.

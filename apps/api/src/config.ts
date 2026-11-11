@@ -8,6 +8,7 @@ const schema = z.object({
  MAX_FILE_MB: z.coerce.number().int().min(1).max(500).default(100),
  JOB_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(300).default(120),
  SESSION_TTL_SECONDS: z.coerce.number().int().min(30).max(1800).default(600),
+ FFPROBE_BIN: z.string().default('ffprobe'),
  YTDLP_BIN: z.string().default('yt-dlp'), FFMPEG_BIN: z.string().default('ffmpeg'), TEMP_ROOT: z.string().optional(),
 });
 export const config = schema.parse(process.env);

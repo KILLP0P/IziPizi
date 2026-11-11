@@ -1,32 +1,40 @@
-# Arquitectura de fase 1
+# Arquitectura multimedia general
 
-El navegador utiliza exclusivamente rutas relativas `/api`. En desarrollo, Vite las reenvía a Fastify; el build de producción lo sirve el propio Fastify. No hay servicios remotos de analítica, fuentes externas ni dependencias visuales de terceros en tiempo de ejecución.
+El navegador utiliza rutas relativas `/api`. En desarrollo, Vite las reenvía a Fastify. El build de producción lo sirve el propio Fastify, también por LAN o mediante el túnel HTTPS configurado.
 
 ## Flujo
 
-1. El esquema compartido valida y normaliza el enlace a `https://x.com/i/web/status/ID`.
-2. El motor reserva un slot de trabajo. El controlador de la petición impone un plazo total y cancela cuando se desconecta el cliente.
-3. El extractor consulta la sindicación pública para fotos, GIFs y orden de publicación; yt-dlp analiza vídeos a través de un proxy de salida temporal. Solo se aceptan fuentes en `video.twimg.com` o `pbs.twimg.com` y MP4 completos por HTTPS.
-4. La respuesta contiene metadatos y un UUID aleatorio que identifica una capacidad temporal en memoria. Las URLs reales de los archivos nunca son parámetros aceptados por la API de descarga.
-5. Fastify sirve la previsualización mediante una petición con DNS validado, IP fijada y límites de tamaño.
-6. La descarga valida el UUID y la calidad, crea un directorio privado y guarda el contenido con un límite real de bytes. Para MP4, FFmpeg procesa solo el archivo local: añade `faststart` a vídeos y convierte las animaciones a GIF con paleta, 15 fps, hasta 640 px y bucle infinito. El GIF se escribe por streaming con límite estricto de bytes.
-7. Fastify envía un attachment con longitud y tipo. El directorio se elimina al finalizar o cerrar la respuesta. También se limpia ante fallos, cancelaciones y apagado normal. Los trabajos abandonados por un apagado brusco se eliminan en el próximo arranque tras una hora.
+1. Zod valida una URL pública HTTP/HTTPS y conserva sus parámetros firmados. Los enlaces de X se normalizan y utilizan su adaptador específico.
+2. Un slot de trabajo y un AbortSignal limitan tiempo y concurrencia. Una desconexión del cliente cancela la operación.
+3. Para enlaces generales se inspecciona la respuesta: un tipo multimedia reconocido genera un archivo directo; el HTML estático se analiza con Cheerio, sin ejecutar scripts. yt-dlp analiza los sitios compatibles a través del proxy de salida protegido. Si no encuentra vídeo/audio descargable, se pueden devolver los medios del HTML con un aviso.
+4. Se construyen capacidades temporales en memoria. El navegador recibe IDs opacos y calidades, nunca una API para suministrar URLs de descarga o argumentos arbitrarios.
+5. Los formatos completos se descargan por HTTP(S) con DNS validado e IP fijada. Para HLS, DASH o pistas separadas, yt-dlp recibe un `media.json` local construido con campos permitidos y un selector fijo. Sus descargadores nativos atraviesan el mismo proxy.
+6. FFmpeg y FFprobe usados por yt-dlp se ejecutan mediante wrappers locales que solo permiten `file,pipe` en cada entrada. Un fallback que pretenda abrir una URL remota se rechaza. La unión y el remux se realizan únicamente sobre medios locales.
+7. FFprobe comprueba los bytes descargados. Los GIF directos se conservan; las animaciones MP4 de X se convierten a GIF con límite estricto de salida. Un attachment entrega el archivo y la respuesta elimina el directorio temporal al terminar, cancelar o fallar.
 
-`packages/shared` no depende de Node. El frontend valida la respuesta con Zod, permitiendo detectar incompatibilidades de contrato. El backend se empaqueta con tsup e incluye el paquete compartido; el servidor construido no necesita ejecutar TypeScript.
+## Módulos
+
+| Archivo | Responsabilidad |
+| --- | --- |
+| `packages/shared/src/index.ts` | URLs, esquemas y contratos compartidos |
+| `extractor.ts` | Orquestación general y adaptador de X |
+| `html.ts` | Detección estática de medios sin navegador |
+| `ytdlp.ts` | Metadatos, calidades y planes de descarga permitidos |
+| `media.ts` | Tipos internos y formatos/MIME |
+| `network.ts` | DNS público, peticiones con IP fijada, proxy HTTP y CONNECT |
+| `native-download.ts` | HLS/DASH, unión de pistas, wrappers sin red y vigilancia de disco |
+| `engine.ts` | Sesiones, descarga, verificación, conversión y temporales |
+| `process.ts` | Procesos sin shell, límites de salida y cancelación del grupo de procesos |
 
 ## API
 
-| Método y ruta | Entrada | Resultado |
+| Método | Entrada | Resultado |
 | --- | --- | --- |
-| `GET /api/health` | — | `{status: "ok", mode: "guest"}`; indica proceso activo, no disponibilidad de X |
-| `POST /api/analyze` | `{url}` | `Analysis`: sesión, caducidad, título, autor público, medios, calidades, avisos |
-| `GET /api/preview/:sessionId/:mediaId` | Capacidad y medio | Imagen JPEG/PNG/WebP limitada a 5 MiB |
-| `POST /api/download` | `{sessionId, mediaId, qualityId}` | Attachment binario o error JSON antes de comenzar la transferencia |
+| `GET /api/health` | — | Proceso activo, modo invitado; no prueba todos los sitios |
+| `POST /api/analyze` | `{url}` | Sesión temporal, título, autor si existe, medios, calidades y avisos |
+| `GET /api/preview/:sessionId/:mediaId` | Capacidad y medio | Imagen JPEG/PNG/WebP/GIF/AVIF limitada a 5 MiB |
+| `POST /api/download` | `{sessionId,mediaId,qualityId}` | Attachment o error JSON antes de comenzar la transferencia |
 
-Todos los errores tienen forma `{error: {code, message}}`. Códigos relevantes: `INVALID_INPUT`, `ORIGIN`, `HOST`, `BUSY`, `EXPIRED`, `FILE_TOO_LARGE`, `TIMEOUT`, `RATE_LIMIT`, `DEPENDENCY_MISSING`, `EXTRACTION_FAILED`.
+Los errores tienen forma `{error:{code,message}}`. Los IDs y sesiones existentes caducan o desaparecen al reiniciar. No hay cuentas ni historial. La interfaz `Engine` conserva la separación para futuras extensiones opcionales.
 
-## Extensiones futuras
-
-Las rutas solo dependen de la interfaz `Engine`. Un futuro módulo de identidad y un repositorio opcional de historial se pueden conectar alrededor de estas rutas sin modificar el extractor ni el contrato de medios. No hay identidad, esquema de usuario, migraciones ni almacenamiento de historial en esta versión. El modo invitado es el único implementado.
-
-Linux ARM64 utiliza los mismos módulos Node y binarios nativos de su distribución. No se fijan rutas de macOS en el motor; `YTDLP_BIN`, `FFMPEG_BIN` y `TEMP_ROOT` son configurables. Los ejemplos de `docker/` no son todavía una receta de producción validada.
+Linux ARM64 utiliza los mismos módulos y binarios de su distribución. `YTDLP_BIN`, `FFMPEG_BIN`, `FFPROBE_BIN` y `TEMP_ROOT` son configurables; no hay rutas de macOS en el motor. Los ejemplos de Docker siguen siendo preparatorios, no un despliegue validado en Raspberry Pi.
