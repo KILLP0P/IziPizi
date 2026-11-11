@@ -1,0 +1,15 @@
+FROM node:24-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg python3-venv ca-certificates \
+    && python3 -m venv /opt/ytdlp && /opt/ytdlp/bin/pip install --no-cache-dir yt-dlp \
+    && rm -rf /var/lib/apt/lists/* \
+    && corepack enable
+ENV PATH="/opt/ytdlp/bin:$PATH"
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json ./
+COPY apps ./apps
+COPY packages ./packages
+RUN pnpm install --frozen-lockfile && pnpm build
+ENV HOST=0.0.0.0 PORT=3001 WEB_ORIGIN=http://localhost:3001 NODE_ENV=production
+USER node
+EXPOSE 3001
+CMD ["node", "apps/api/dist/index.js"]

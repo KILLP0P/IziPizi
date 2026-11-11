@@ -1,0 +1,25 @@
+# Preparation only; not yet verified on Raspberry Pi 5.
+services:
+  izipizi:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.example
+    platform: linux/arm64
+    ports:
+      - "127.0.0.1:3001:3001"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    mem_limit: 768m
+    cpus: 2
+    pids_limit: 96
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      HOST: 0.0.0.0
+      WEB_ORIGIN: http://localhost:3001
+      MAX_CONCURRENT: 2
+      MAX_FILE_MB: 100
